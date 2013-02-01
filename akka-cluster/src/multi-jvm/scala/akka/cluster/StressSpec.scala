@@ -55,7 +55,7 @@ object StressMultiJvmSpec extends MultiNodeConfig {
 
   // Note that this test uses default configuration,
   // not MultiNodeClusterSpec.clusterConfig
-  commonConfig(debugConfig(on = true).withFallback(ConfigFactory.parseString("""
+  commonConfig(debugConfig(on = false).withFallback(ConfigFactory.parseString("""
     akka.test.cluster-stress-spec {
       # scale the nr-of-nodes* settings with this factor
       nr-of-nodes-factor = 1

@@ -18,6 +18,7 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.Awaitable
 import akka.actor.ActorContext
 import scala.util.control.NonFatal
+import java.util.concurrent.TimeUnit
 
 /*
  * Locking rules:
@@ -240,7 +241,10 @@ class CallingThreadDispatcher(
   private def runQueue(mbox: CallingThreadMailbox, queue: NestingQueue, interruptedex: InterruptedException = null) {
     var intex = interruptedex;
     assert(queue.isActive)
-    mbox.ctdLock.lock
+    while (!mbox.ctdLock.tryLock(50, TimeUnit.MILLISECONDS)) {
+      // if our mailbox doesn't have messages, then someone else picked them up
+      if (!mbox.hasSystemMessages && !mbox.queue.q.hasMessages) return
+    }
     val recurse = try {
       mbox.processAllSystemMessages()
       val handle = mbox.suspendSwitch.fold[Envelope] {

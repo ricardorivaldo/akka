@@ -7,7 +7,6 @@ import language.postfixOps
 
 import java.lang.ref.WeakReference
 import java.util.concurrent.locks.ReentrantLock
-import java.util.LinkedList
 import scala.annotation.tailrec
 import com.typesafe.config.Config
 import akka.actor.{ ActorInitializationException, ExtensionIdProvider, ExtensionId, Extension, ExtendedActorSystem, ActorRef, ActorCell }
@@ -15,8 +14,6 @@ import akka.dispatch.{ MessageQueue, MailboxType, TaskInvocation, SystemMessage,
 import scala.concurrent.duration._
 import akka.util.Switch
 import scala.concurrent.duration.Duration
-import scala.concurrent.Awaitable
-import akka.actor.ActorContext
 import scala.util.control.NonFatal
 import java.util.concurrent.TimeUnit
 
@@ -241,55 +238,57 @@ class CallingThreadDispatcher(
   private def runQueue(mbox: CallingThreadMailbox, queue: NestingQueue, interruptedex: InterruptedException = null) {
     var intex = interruptedex;
     assert(queue.isActive)
-    while (!mbox.ctdLock.tryLock(50, TimeUnit.MILLISECONDS)) {
-      // if our mailbox doesn't have messages, then someone else picked them up
-      if (!mbox.hasSystemMessages && !mbox.queue.q.hasMessages) return
-    }
-    val recurse = try {
-      mbox.processAllSystemMessages()
-      val handle = mbox.suspendSwitch.fold[Envelope] {
-        queue.leave
-        null
-      } {
-        val ret = if (mbox.isClosed) null else queue.q.dequeue()
-        if (ret eq null) queue.leave
-        ret
-      }
-      if (handle ne null) {
-        try {
-          if (Mailbox.debug) println(mbox.actor.self + " processing message " + handle)
-          mbox.actor.invoke(handle)
-          if (Thread.interrupted()) { // clear interrupted flag before we continue
-            intex = new InterruptedException("Interrupted during message processing")
-            log.error(intex, "Interrupted during message processing")
-          }
-          true
-        } catch {
-          case ie: InterruptedException ⇒
-            log.error(ie, "Interrupted during message processing")
-            Thread.interrupted() // clear interrupted flag before continuing
-            intex = ie
-            true
-          case NonFatal(e) ⇒
-            log.error(e, "Error during message processing")
-            queue.leave
-            false
-        }
-      } else if (queue.isActive) {
-        queue.leave
-        false
-      } else false
-    } catch {
-      case NonFatal(e) ⇒ queue.leave; throw e
-    } finally {
-      mbox.ctdLock.unlock
-    }
-    if (recurse) {
-      runQueue(mbox, queue, intex)
+    if (!mbox.ctdLock.tryLock(50, TimeUnit.MILLISECONDS)) {
+      // if we didn't get the lock and our mailbox still has messages, then we need to try again
+      if (mbox.hasSystemMessages || mbox.queue.q.hasMessages)
+        runQueue(mbox, queue, interruptedex)
     } else {
-      if (intex ne null) {
-        Thread.interrupted() // clear interrupted flag before throwing according to java convention
-        throw intex
+      val recurse = try {
+        mbox.processAllSystemMessages()
+        val handle = mbox.suspendSwitch.fold[Envelope] {
+          queue.leave
+          null
+        } {
+          val ret = if (mbox.isClosed) null else queue.q.dequeue()
+          if (ret eq null) queue.leave
+          ret
+        }
+        if (handle ne null) {
+          try {
+            if (Mailbox.debug) println(mbox.actor.self + " processing message " + handle)
+            mbox.actor.invoke(handle)
+            if (Thread.interrupted()) { // clear interrupted flag before we continue
+              intex = new InterruptedException("Interrupted during message processing")
+              log.error(intex, "Interrupted during message processing")
+            }
+            true
+          } catch {
+            case ie: InterruptedException ⇒
+              log.error(ie, "Interrupted during message processing")
+              Thread.interrupted() // clear interrupted flag before continuing
+              intex = ie
+              true
+            case NonFatal(e) ⇒
+              log.error(e, "Error during message processing")
+              queue.leave
+              false
+          }
+        } else if (queue.isActive) {
+          queue.leave
+          false
+        } else false
+      } catch {
+        case NonFatal(e) ⇒ queue.leave; throw e
+      } finally {
+        mbox.ctdLock.unlock
+      }
+      if (recurse) {
+        runQueue(mbox, queue, intex)
+      } else {
+        if (intex ne null) {
+          Thread.interrupted() // clear interrupted flag before throwing according to java convention
+          throw intex
+        }
       }
     }
   }

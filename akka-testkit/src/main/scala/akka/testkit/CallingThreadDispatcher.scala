@@ -225,6 +225,14 @@ class CallingThreadDispatcher(
 
   protected[akka] override def executeTask(invocation: TaskInvocation) { invocation.run }
 
+  private def checkThreadInterruption(interruptedex: InterruptedException): InterruptedException = {
+    if (Thread.interrupted()) { // clear interrupted flag before we continue
+      val intex = new InterruptedException("Interrupted during message processing")
+      log.error(intex, "Interrupted during message processing")
+      intex
+    } else interruptedex
+  }
+
   /*
    * This method must be called with this thread's queue, which must already
    * have been entered (active). When this method returns, the queue will be
@@ -236,14 +244,19 @@ class CallingThreadDispatcher(
    */
   @tailrec
   private def runQueue(mbox: CallingThreadMailbox, queue: NestingQueue, interruptedex: InterruptedException = null) {
-    var intex = interruptedex;
+    var intex = checkThreadInterruption(interruptedex)
     assert(queue.isActive)
-    if (!mbox.ctdLock.tryLock(50, TimeUnit.MILLISECONDS)) {
+    val recurse = if (!mbox.ctdLock.tryLock(50, TimeUnit.MILLISECONDS)) {
       // if we didn't get the lock and our mailbox still has messages, then we need to try again
-      if (mbox.hasSystemMessages || mbox.queue.q.hasMessages)
-        runQueue(mbox, queue, interruptedex)
+      if (mbox.hasSystemMessages || mbox.hasMessages) {
+        true
+      } else {
+        intex = checkThreadInterruption(intex)
+        queue.leave
+        false
+      }
     } else {
-      val recurse = try {
+      try {
         mbox.processAllSystemMessages()
         val handle = mbox.suspendSwitch.fold[Envelope] {
           queue.leave
@@ -257,10 +270,7 @@ class CallingThreadDispatcher(
           try {
             if (Mailbox.debug) println(mbox.actor.self + " processing message " + handle)
             mbox.actor.invoke(handle)
-            if (Thread.interrupted()) { // clear interrupted flag before we continue
-              intex = new InterruptedException("Interrupted during message processing")
-              log.error(intex, "Interrupted during message processing")
-            }
+            intex = checkThreadInterruption(intex)
             true
           } catch {
             case ie: InterruptedException ⇒
@@ -282,13 +292,13 @@ class CallingThreadDispatcher(
       } finally {
         mbox.ctdLock.unlock
       }
-      if (recurse) {
-        runQueue(mbox, queue, intex)
-      } else {
-        if (intex ne null) {
-          Thread.interrupted() // clear interrupted flag before throwing according to java convention
-          throw intex
-        }
+    }
+    if (recurse) {
+      runQueue(mbox, queue, intex)
+    } else {
+      if (intex ne null) {
+        Thread.interrupted() // clear interrupted flag before throwing according to java convention
+        throw intex
       }
     }
   }
